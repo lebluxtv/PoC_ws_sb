@@ -1,1 +1,211 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>PoC — Envoi d'arguments à Streamer.bot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 20px; background: #111; color: #ddd; }
+    h1 { margin: 0 0 10px; font-size: 18px; }
+    .row { display: grid; grid-template-columns: 140px 1fr; gap: 10px; margin: 6px 0; align-items: center; }
+    input, select, button { padding: 8px 10px; background: #1b1b1b; color: #eee; border: 1px solid #333; border-radius: 6px; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    .box { border: 1px solid #333; border-radius: 10px; padding: 12px; margin: 14px 0; background: #141414; }
+    .ok { color: #7be27b; }
+    .bad { color: #ff8585; }
+    #log { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; background: #0d0d0d; height: 240px; overflow: auto; padding: 10px; border-radius: 8px; border: 1px solid #222; }
+  </style>
+</head>
+<body>
+  <h1>PoC — Envoi d'arguments à une action Streamer.bot</h1>
+
+  <div class="box">
+    <div class="row">
+      <label>Hôte</label>
+      <input id="host" value="127.0.0.1">
+    </div>
+    <div class="row">
+      <label>Port</label>
+      <input id="port" type="number" value="8080" min="1" max="65535">
+    </div>
+    <div class="row">
+      <label>Mot de passe</label>
+      <input id="pwd" type="password" placeholder="Mot de passe WS Streamer.bot">
+    </div>
+    <div class="row">
+      <label>Action (nom)</label>
+      <input id="actionName" value="WS Args Echo Test">
+    </div>
+    <div class="row">
+      <label>—</label>
+      <button id="btnConnect">Se connecter</button>
+    </div>
+    <div class="row">
+      <label>État</label>
+      <div id="state">Déconnecté</div>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="row">
+      <label>Année (de)</label>
+      <input id="yearFrom" type="number" value="1980" min="1970" max="2100">
+    </div>
+    <div class="row">
+      <label>Année (à)</label>
+      <input id="yearTo" type="number" value="2025" min="1970" max="2100">
+    </div>
+    <div class="row">
+      <label>Note min</label>
+      <input id="minRating" type="number" value="80" min="0" max="100">
+    </div>
+    <div class="row">
+      <label>Inclure genre (id)</label>
+      <input id="includeGenreId" placeholder="ex: 12 ou laisser vide">
+    </div>
+    <div class="row">
+      <label>Exclure genres (ids)</label>
+      <input id="excludeGenreIds" placeholder="ex: 5,16,31 (séparés par virgules)">
+    </div>
+    <div class="row">
+      <label>—</label>
+      <button id="btnSend" disabled>Envoyer DoAction</button>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="row">
+      <label>Log</label>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (sel) => document.querySelector(sel);
+    const logEl = $('#log');
+
+    function log(msg, cls) {
+      const line = document.createElement('div');
+      if (cls) line.className = cls;
+      const ts = new Date().toLocaleTimeString();
+      line.textContent = `[${ts}] ${msg}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+      console[cls === 'bad' ? 'error' : 'log'](msg);
+    }
+
+    let ws = null;
+    let isReady = false;
+
+    function buildArgsFromUI() {
+      const yf = parseInt($('#yearFrom').value, 10);
+      const yt = parseInt($('#yearTo').value, 10);
+      const mr = $('#minRating').value === '' ? null : parseInt($('#minRating').value, 10);
+      const inc = ($('#includeGenreId').value || '').trim();
+      const exc = ($('#excludeGenreIds').value || '').trim();
+      const exclArr = exc ? exc.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+      const args = {
+        nonce: Date.now().toString(36),
+        includeGenreId: inc,
+        excludeGenreIds: exclArr,
+        yearFrom: Number.isFinite(yf) ? yf : null,
+        yearTo: Number.isFinite(yt) ? yt : null,
+        minRating: (mr === null || Number.isNaN(mr)) ? null : mr
+      };
+      // On ajoute aussi une copie JSON pour debug côté C#
+      args._json = JSON.stringify(args);
+      return args;
+    }
+
+    function sendDoAction() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        log("WebSocket non connecté.", "bad");
+        return;
+      }
+      const actionName = $('#actionName').value.trim();
+      if (!actionName) {
+        log("Nom d'action vide.", "bad");
+        return;
+      }
+      const args = buildArgsFromUI();
+
+      const payload = {
+        request: 'DoAction',
+        id: 'poc-' + Date.now(),
+        action: { name: actionName },
+        args
+      };
+      ws.send(JSON.stringify(payload));
+      log('DoAction envoyé: ' + JSON.stringify(args), 'ok');
+    }
+
+    function connect() {
+      const host = $('#host').value.trim() || '127.0.0.1';
+      const port = parseInt($('#port').value, 10) || 8080;
+      const url  = `ws://${host}:${port}/`;
+
+      try { ws?.close(); } catch {}
+      ws = new WebSocket(url);
+
+      ws.addEventListener('open', () => {
+        log("WS ouvert → on s'authentifie…", 'ok');
+        $('#state').textContent = 'Connecté (auth en cours)';
+
+        // Auth / Subscribe : selon version, "password" ou "apiPassword"
+        const password = $('#pwd').value || '';
+        const auth1 = {
+          request: 'Subscribe',
+          id: 'auth-1',
+          password,
+          events: { general: ['Custom'] } // peu importe ici
+        };
+        ws.send(JSON.stringify(auth1));
+
+        // Par sécurité, on renvoie un 2e format possible (certaines versions)
+        const auth2 = {
+          request: 'Subscribe',
+          id: 'auth-2',
+          apiPassword: password,
+          events: { general: ['Custom'] }
+        };
+        ws.send(JSON.stringify(auth2));
+      });
+
+      ws.addEventListener('message', (ev) => {
+        // INFO : la réponse d’auth n’est pas toujours explicite — on active les boutons après "open"
+        try {
+          const data = JSON.parse(ev.data);
+          if (data?.request === 'Subscribe' || data?.id?.startsWith?.('auth')) {
+            isReady = true;
+            $('#btnSend').disabled = false;
+            $('#state').textContent = 'Connecté';
+            log('Réponse Subscribe: ' + ev.data);
+          } else {
+            log('WS message: ' + ev.data);
+          }
+        } catch {
+          log('WS message (texte): ' + ev.data);
+        }
+      });
+
+      ws.addEventListener('error', (ev) => {
+        log('WS erreur (voir console): ' + (ev?.message || ''), 'bad');
+        console.error(ev);
+      });
+
+      ws.addEventListener('close', (ev) => {
+        isReady = false;
+        $('#btnSend').disabled = true;
+        $('#state').textContent = 'Déconnecté';
+        log(`WS fermé code=${ev.code} reason=${ev.reason}`, 'bad');
+      });
+    }
+
+    $('#btnConnect').addEventListener('click', connect);
+    $('#btnSend').addEventListener('click', sendDoAction);
+  </script>
+</body>
+</html>
 
